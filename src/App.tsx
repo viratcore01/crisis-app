@@ -102,6 +102,7 @@ function App() {
   const [authPassword, setAuthPassword] = useState('');
   const [authConfirm, setAuthConfirm] = useState('');
   const [authError, setAuthError] = useState('');
+  const [authNotice, setAuthNotice] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
   const [displayName, setDisplayName] = useState('');
   const [incidents, setIncidents] = useState<Incident[]>([]);
@@ -197,12 +198,21 @@ function App() {
     setActiveTab('overview');
   }, [currentRole, isAuthenticated]);
 
+  const isAuthBackendReady = Boolean(supabase);
+  const disableCredentialSubmit = authLoading || (!isAuthBackendReady && authRole !== 'guest');
+
   const handleAuthSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    setAuthError('');
+    setAuthNotice('');
 
     const needsCredentials = authRole !== 'guest';
     if (!needsCredentials) {
       await handleGuestContinue();
+      return;
+    }
+    if (!supabase) {
+      setAuthError('Auth backend is not configured. Add Supabase env vars and redeploy.');
       return;
     }
 
@@ -223,27 +233,7 @@ function App() {
       return;
     }
 
-    setAuthError('');
     setAuthLoading(true);
-
-    if (!supabase) {
-      const emailPrefix = authEmail.includes('@') ? authEmail.split('@')[0] : authEmail;
-      const derivedName = authName.trim() || emailPrefix || 'Operator';
-
-      setIsAuthenticated(true);
-      setCurrentRole(authRole);
-      setDisplayName(derivedName);
-      setActiveTab('overview');
-      setAuthPassword('');
-      setAuthConfirm('');
-
-      localStorage.setItem(
-        AUTH_STORAGE_KEY,
-        JSON.stringify({ role: authRole, name: derivedName, email: authEmail })
-      );
-      setAuthLoading(false);
-      return;
-    }
 
     try {
       if (authMode === 'signup') {
@@ -263,19 +253,19 @@ function App() {
           return;
         }
 
-        if (!data.session) {
-          setAuthError('Check your email to confirm your account, then sign in.');
-          return;
+        if (data.session) {
+          await supabase.auth.signOut();
         }
 
-        const resolvedRole = resolveRoleFromUser(data.user);
-        const name = resolveNameFromUser(data.user) || authName.trim() || authEmail.split('@')[0];
-
-        setIsAuthenticated(true);
-        setCurrentRole(resolvedRole);
-        setAuthRole(resolvedRole);
-        setDisplayName(name);
-        setActiveTab('overview');
+        setAuthNotice(
+          data.session
+            ? 'Account created. Please sign in to continue.'
+            : 'Check your email to confirm your account, then sign in.'
+        );
+        setAuthMode('login');
+        setAuthPassword('');
+        setAuthConfirm('');
+        return;
       } else {
         const { data, error } = await supabase.auth.signInWithPassword({
           email: authEmail,
@@ -307,6 +297,7 @@ function App() {
   const handleGuestContinue = async () => {
     const guestName = authName.trim() || 'Guest';
     setAuthError('');
+    setAuthNotice('');
     if (!supabase) {
       setIsAuthenticated(true);
       setCurrentRole('guest');
@@ -701,6 +692,7 @@ function App() {
                   onClick={() => {
                     setAuthMode('login');
                     setAuthError('');
+                    setAuthNotice('');
                   }}
                   disabled={authLoading}
                   className={`px-4 py-2 rounded-xl transition-all ${authMode === 'login' ? 'bg-white text-black' : 'text-zinc-300 hover:text-white'}`}
@@ -712,6 +704,7 @@ function App() {
                   onClick={() => {
                     setAuthMode('signup');
                     setAuthError('');
+                    setAuthNotice('');
                   }}
                   disabled={authLoading}
                   className={`px-4 py-2 rounded-xl transition-all ${authMode === 'signup' ? 'bg-white text-black' : 'text-zinc-300 hover:text-white'}`}
@@ -731,6 +724,7 @@ function App() {
                     onClick={() => {
                       setAuthRole(id);
                       setAuthError('');
+                      setAuthNotice('');
                     }}
                     disabled={authLoading}
                     className={`rounded-2xl border px-3 py-4 text-left transition-all ${
@@ -746,6 +740,13 @@ function App() {
                 ))}
               </div>
             </div>
+
+            {!isAuthBackendReady && authRole !== 'guest' && (
+              <div className="mt-5 rounded-2xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-xs text-amber-200">
+                Supabase auth is not configured on this deploy. Staff and management login
+                will not persist until `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` are set.
+              </div>
+            )}
 
             <form onSubmit={handleAuthSubmit} className="mt-6 space-y-4">
               {authMode === 'signup' && (
@@ -799,9 +800,15 @@ function App() {
                 </div>
               )}
 
+              {authNotice && (
+                <div className="rounded-2xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-xs text-emerald-200">
+                  {authNotice}
+                </div>
+              )}
+
               <button
                 type="submit"
-                disabled={authLoading}
+                disabled={disableCredentialSubmit}
                 className="w-full rounded-2xl bg-red-600 py-4 text-sm font-semibold hover:bg-red-500 transition-all disabled:cursor-not-allowed disabled:opacity-70"
               >
                 {authLoading ? (authMode === 'signup' ? 'Creating Access...' : 'Signing In...') : authMode === 'signup' ? 'Create Access' : 'Sign In'}

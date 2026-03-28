@@ -377,7 +377,8 @@ function App() {
         const { data: propData } = await supabase
           .from('properties')
           .select('*')
-          .single();
+          .limit(1)
+          .maybeSingle();
         setProperty(propData);
 
         // Fetch incidents

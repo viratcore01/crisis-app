@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type FormEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   AlertTriangle, Flame, Users, MapPin, 
@@ -38,6 +38,8 @@ interface Task {
   created_at: string;
 }
 
+type Role = 'manager' | 'staff' | 'guest';
+
 const SEVERITY_COLORS: Record<string, string> = {
   critical: 'text-red-500 border-red-500',
   high: 'text-orange-500 border-orange-500',
@@ -45,8 +47,47 @@ const SEVERITY_COLORS: Record<string, string> = {
   low: 'text-blue-500 border-blue-500',
 };
 
+const ROLE_OPTIONS: Array<{
+  id: Role;
+  label: string;
+  helper: string;
+  Icon: typeof Shield;
+}> = [
+  { id: 'guest', label: 'Guest', helper: 'Request help in seconds', Icon: User },
+  { id: 'staff', label: 'Staff', helper: 'Coordinate response', Icon: Users },
+  { id: 'manager', label: 'Manager', helper: 'Command center view', Icon: Shield },
+];
+
+const ROLE_LABELS: Record<Role, string> = {
+  guest: 'Guest',
+  staff: 'Staff',
+  manager: 'Management',
+};
+
+const ROLE_BADGE: Record<Role, string> = {
+  guest: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
+  staff: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+  manager: 'bg-red-500/15 text-red-300 border-red-500/30',
+};
+
+const AUTH_STORAGE_KEY = 'rapid_auth';
+
+const isRole = (value: unknown): value is Role => {
+  return typeof value === 'string' && ['manager', 'staff', 'guest'].includes(value);
+};
+
 function App() {
-  const [currentRole, setCurrentRole] = useState<'manager' | 'staff' | 'guest'>('manager');
+  const [currentRole, setCurrentRole] = useState<Role>('guest');
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
+  const [authRole, setAuthRole] = useState<Role>('guest');
+  const [authName, setAuthName] = useState('');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authConfirm, setAuthConfirm] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [displayName, setDisplayName] = useState('');
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -59,6 +100,244 @@ function App() {
   const [analysis, setAnalysis] = useState<any>(null);
   const [property, setProperty] = useState<any>(null);
   const [activeTab, setActiveTab] = useState('overview');
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const hydrateFromSession = async () => {
+      if (supabase) {
+        const { data, error } = await supabase.auth.getSession();
+        if (!isMounted) return;
+
+        if (error) {
+          console.error('Auth session error:', error);
+        }
+
+        const session = data.session;
+        if (session?.user) {
+          localStorage.removeItem(AUTH_STORAGE_KEY);
+          const metadataRole = session.user.user_metadata?.role;
+          const resolvedRole = isRole(metadataRole) ? metadataRole : 'staff';
+          const name =
+            typeof session.user.user_metadata?.name === 'string'
+              ? session.user.user_metadata.name
+              : session.user.email?.split('@')[0] ?? '';
+
+          setIsAuthenticated(true);
+          setCurrentRole(resolvedRole);
+          setAuthRole(resolvedRole);
+          setDisplayName(name);
+          setAuthEmail(session.user.email ?? '');
+          return;
+        }
+      }
+
+      const stored = localStorage.getItem(AUTH_STORAGE_KEY);
+      if (!stored) return;
+
+      try {
+        const parsed = JSON.parse(stored) as { role?: string; name?: string };
+        if (isRole(parsed.role)) {
+          setIsAuthenticated(true);
+          setCurrentRole(parsed.role);
+          setAuthRole(parsed.role);
+          setDisplayName(typeof parsed.name === 'string' ? parsed.name : '');
+        }
+      } catch {
+        localStorage.removeItem(AUTH_STORAGE_KEY);
+      }
+    };
+
+    hydrateFromSession();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!supabase) return;
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session?.user) {
+        localStorage.removeItem(AUTH_STORAGE_KEY);
+        const metadataRole = session.user.user_metadata?.role;
+        const resolvedRole = isRole(metadataRole) ? metadataRole : 'staff';
+        const name =
+          typeof session.user.user_metadata?.name === 'string'
+            ? session.user.user_metadata.name
+            : session.user.email?.split('@')[0] ?? '';
+
+        setIsAuthenticated(true);
+        setCurrentRole(resolvedRole);
+        setAuthRole(resolvedRole);
+        setDisplayName(name);
+        setAuthEmail(session.user.email ?? '');
+        return;
+      }
+
+      setIsAuthenticated(false);
+      setDisplayName('');
+    });
+
+    return () => {
+      data.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    setActiveTab('overview');
+  }, [currentRole, isAuthenticated]);
+
+  const handleAuthSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    const needsCredentials = authRole !== 'guest';
+    if (!needsCredentials) {
+      handleGuestContinue();
+      return;
+    }
+
+    if (authMode === 'signup' && needsCredentials && !authName.trim()) {
+      setAuthError('Full name is required for staff or management accounts.');
+      return;
+    }
+    if (needsCredentials && !authEmail.trim()) {
+      setAuthError('Email is required for staff or management.');
+      return;
+    }
+    if (needsCredentials && !authPassword.trim()) {
+      setAuthError('Password is required.');
+      return;
+    }
+    if (authMode === 'signup' && authPassword !== authConfirm) {
+      setAuthError('Passwords do not match.');
+      return;
+    }
+
+    setAuthError('');
+    setAuthLoading(true);
+
+    if (!supabase) {
+      const emailPrefix = authEmail.includes('@') ? authEmail.split('@')[0] : authEmail;
+      const derivedName = authName.trim() || emailPrefix || (authRole === 'guest' ? 'Guest' : 'Operator');
+
+      setIsAuthenticated(true);
+      setCurrentRole(authRole);
+      setDisplayName(derivedName);
+      setActiveTab('overview');
+      setAuthPassword('');
+      setAuthConfirm('');
+
+      localStorage.setItem(
+        AUTH_STORAGE_KEY,
+        JSON.stringify({ role: authRole, name: derivedName, email: authEmail })
+      );
+      setAuthLoading(false);
+      return;
+    }
+
+    try {
+      if (authMode === 'signup') {
+        const { data, error } = await supabase.auth.signUp({
+          email: authEmail,
+          password: authPassword,
+          options: {
+            data: {
+              role: authRole,
+              name: authName.trim(),
+            },
+          },
+        });
+
+        if (error) {
+          setAuthError(error.message);
+          return;
+        }
+
+        if (!data.session) {
+          setAuthError('Check your email to confirm your account, then sign in.');
+          return;
+        }
+
+        const metadataRole = data.user?.user_metadata?.role;
+        const resolvedRole = isRole(metadataRole) ? metadataRole : authRole;
+        const name =
+          typeof data.user?.user_metadata?.name === 'string'
+            ? data.user?.user_metadata.name
+            : authName.trim() || authEmail.split('@')[0];
+
+        setIsAuthenticated(true);
+        setCurrentRole(resolvedRole);
+        setAuthRole(resolvedRole);
+        setDisplayName(name);
+        setActiveTab('overview');
+      } else {
+        const { data, error } = await supabase.auth.signInWithPassword({
+          email: authEmail,
+          password: authPassword,
+        });
+
+        if (error) {
+          setAuthError(error.message);
+          return;
+        }
+
+        const metadataRole = data.user?.user_metadata?.role;
+        const resolvedRole = isRole(metadataRole) ? metadataRole : authRole;
+        const name =
+          typeof data.user?.user_metadata?.name === 'string'
+            ? data.user?.user_metadata.name
+            : data.user?.email?.split('@')[0] ?? 'Operator';
+
+        setIsAuthenticated(true);
+        setCurrentRole(resolvedRole);
+        setAuthRole(resolvedRole);
+        setDisplayName(name);
+        setActiveTab('overview');
+      }
+
+      setAuthPassword('');
+      setAuthConfirm('');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleGuestContinue = () => {
+    const guestName = authName.trim() || 'Guest';
+    setAuthError('');
+    setIsAuthenticated(true);
+    setCurrentRole('guest');
+    setAuthRole('guest');
+    setDisplayName(guestName);
+    setActiveTab('overview');
+
+    localStorage.setItem(
+      AUTH_STORAGE_KEY,
+      JSON.stringify({ role: 'guest', name: guestName })
+    );
+  };
+
+  const handleLogout = async () => {
+    if (supabase) {
+      await supabase.auth.signOut();
+    }
+    localStorage.removeItem(AUTH_STORAGE_KEY);
+    setIsAuthenticated(false);
+    setCurrentRole('guest');
+    setAuthRole('guest');
+    setAuthMode('login');
+    setDisplayName('');
+    setAuthName('');
+    setAuthEmail('');
+    setAuthPassword('');
+    setAuthConfirm('');
+    setAuthError('');
+    setSelectedIncident(null);
+    setShowPanicModal(false);
+    setActiveTab('overview');
+  };
 
   // Fetch data
   const fetchData = async () => {
@@ -156,12 +435,13 @@ function App() {
   };
 
   useEffect(() => {
+    if (!isAuthenticated) return;
     fetchData();
 
     // Poll for updates every 8 seconds
     const interval = setInterval(fetchData, 8000);
     return () => clearInterval(interval);
-  }, []);
+  }, [isAuthenticated]);
 
   const triggerPanic = async () => {
     if (!panicMessage.trim()) return;
@@ -342,6 +622,184 @@ function App() {
     currentRole === 'manager' || i.status === 'active'
   );
 
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-zinc-950 text-white relative overflow-hidden">
+        <div className="absolute inset-0">
+          <div className="absolute -top-24 left-1/2 h-72 w-[720px] -translate-x-1/2 rounded-full bg-red-600/20 blur-[120px]" />
+          <div className="absolute bottom-0 right-0 h-72 w-72 bg-sky-500/10 blur-[120px]" />
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(255,255,255,0.08),_transparent_52%)]" />
+        </div>
+
+        <div className="relative z-10 max-w-6xl mx-auto px-6 py-12 lg:py-20 grid lg:grid-cols-2 gap-10 items-center">
+          <div>
+            <div className="inline-flex items-center gap-3 bg-red-500/10 border border-red-500/30 text-red-300 px-4 py-2 rounded-full text-xs uppercase tracking-[0.2em]">
+              Crisis Response Platform
+            </div>
+            <h1 className="text-5xl lg:text-6xl font-semibold tracking-tight mt-6">
+              Command your response in seconds.
+            </h1>
+            <p className="text-zinc-400 text-lg mt-5 max-w-xl">
+              Choose your role to access the right tools. Guests get a calm panic interface.
+              Staff get live assignments. Management sees the full incident command view.
+            </p>
+
+            <div className="mt-10 grid grid-cols-2 gap-4 max-w-md">
+              <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4">
+                <div className="text-xs text-zinc-500 uppercase tracking-widest">Response time</div>
+                <div className="text-3xl font-semibold mt-2">90s</div>
+                <div className="text-xs text-zinc-500 mt-2">Average dispatch goal</div>
+              </div>
+              <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4">
+                <div className="text-xs text-zinc-500 uppercase tracking-widest">System status</div>
+                <div className="text-3xl font-semibold mt-2 text-emerald-400">Online</div>
+                <div className="text-xs text-zinc-500 mt-2">All channels active</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-zinc-900/90 border border-zinc-800 rounded-3xl p-8 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="text-xs text-zinc-500 uppercase tracking-widest">Access Control</div>
+                <div className="text-3xl font-semibold mt-2">RAPID Access</div>
+                <div className="text-sm text-zinc-400 mt-1">Sign in or create a role-based session.</div>
+              </div>
+              <div className="flex bg-zinc-800 rounded-2xl p-1 text-xs">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode('login');
+                    setAuthError('');
+                  }}
+                  disabled={authLoading}
+                  className={`px-4 py-2 rounded-xl transition-all ${authMode === 'login' ? 'bg-white text-black' : 'text-zinc-300 hover:text-white'}`}
+                >
+                  LOGIN
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode('signup');
+                    setAuthError('');
+                  }}
+                  disabled={authLoading}
+                  className={`px-4 py-2 rounded-xl transition-all ${authMode === 'signup' ? 'bg-white text-black' : 'text-zinc-300 hover:text-white'}`}
+                >
+                  SIGN UP
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-7">
+              <div className="text-xs uppercase tracking-widest text-zinc-500">Choose role</div>
+              <div className="grid grid-cols-3 gap-3 mt-3">
+                {ROLE_OPTIONS.map(({ id, label, helper, Icon }) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => {
+                      setAuthRole(id);
+                      setAuthError('');
+                    }}
+                    disabled={authLoading}
+                    className={`rounded-2xl border px-3 py-4 text-left transition-all ${
+                      authRole === id
+                        ? 'border-red-500/60 bg-red-500/10'
+                        : 'border-zinc-800 bg-zinc-950/40 hover:border-zinc-700'
+                    }`}
+                  >
+                    <Icon className="w-5 h-5 mb-3" />
+                    <div className="text-sm font-semibold">{label}</div>
+                    <div className="text-[10px] text-zinc-500 mt-1">{helper}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <form onSubmit={handleAuthSubmit} className="mt-6 space-y-4">
+              {authMode === 'signup' && (
+                <div>
+                  <label className="text-xs text-zinc-400 uppercase tracking-widest">Full name</label>
+                  <input
+                    type="text"
+                    value={authName}
+                    onChange={(e) => setAuthName(e.target.value)}
+                    placeholder="Ava Martinez"
+                    className="mt-2 w-full rounded-2xl bg-black border border-zinc-700 px-4 py-3 text-sm focus:border-red-500 focus:outline-none"
+                  />
+                </div>
+              )}
+              <div>
+                <label className="text-xs text-zinc-400 uppercase tracking-widest">Email</label>
+                <input
+                  type="email"
+                  value={authEmail}
+                  onChange={(e) => setAuthEmail(e.target.value)}
+                  placeholder="name@hotel.com"
+                  className="mt-2 w-full rounded-2xl bg-black border border-zinc-700 px-4 py-3 text-sm focus:border-red-500 focus:outline-none"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-zinc-400 uppercase tracking-widest">Password</label>
+                <input
+                  type="password"
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="mt-2 w-full rounded-2xl bg-black border border-zinc-700 px-4 py-3 text-sm focus:border-red-500 focus:outline-none"
+                />
+              </div>
+              {authMode === 'signup' && (
+                <div>
+                  <label className="text-xs text-zinc-400 uppercase tracking-widest">Confirm password</label>
+                  <input
+                    type="password"
+                    value={authConfirm}
+                    onChange={(e) => setAuthConfirm(e.target.value)}
+                    placeholder="••••••••"
+                    className="mt-2 w-full rounded-2xl bg-black border border-zinc-700 px-4 py-3 text-sm focus:border-red-500 focus:outline-none"
+                  />
+                </div>
+              )}
+
+              {authError && (
+                <div className="rounded-2xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-xs text-red-200">
+                  {authError}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={authLoading}
+                className="w-full rounded-2xl bg-red-600 py-4 text-sm font-semibold hover:bg-red-500 transition-all disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {authLoading ? (authMode === 'signup' ? 'Creating Access...' : 'Signing In...') : authMode === 'signup' ? 'Create Access' : 'Sign In'}
+              </button>
+
+              {authRole === 'guest' && (
+                <button
+                  type="button"
+                  onClick={handleGuestContinue}
+                  disabled={authLoading}
+                  className="w-full rounded-2xl border border-zinc-700 py-3.5 text-sm text-zinc-200 hover:bg-zinc-800 transition-all disabled:cursor-not-allowed disabled:opacity-70"
+                >
+                  Continue as Guest
+                </button>
+              )}
+            </form>
+
+            <div className="mt-6 text-xs text-zinc-500">
+              {authMode === 'login'
+                ? 'Need management access? Switch to sign up and choose Management.'
+                : 'Already assigned? Switch to login to continue.'}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-zinc-950 text-white">
       {/* Top Navigation */}
@@ -367,31 +825,21 @@ function App() {
           </div>
 
           <div className="flex items-center gap-3">
-            {/* Role Switcher */}
-            <div className="flex bg-zinc-800 rounded-2xl p-1 text-sm">
-              <button 
-                onClick={() => setCurrentRole('manager')}
-                className={`px-5 py-1.5 rounded-[14px] transition-all ${currentRole === 'manager' ? 'bg-white text-black shadow' : 'hover:bg-zinc-700'}`}
-              >
-                MANAGER
-              </button>
-              <button 
-                onClick={() => setCurrentRole('staff')}
-                className={`px-5 py-1.5 rounded-[14px] transition-all ${currentRole === 'staff' ? 'bg-white text-black shadow' : 'hover:bg-zinc-700'}`}
-              >
-                STAFF
-              </button>
-              <button 
-                onClick={() => setCurrentRole('guest')}
-                className={`px-5 py-1.5 rounded-[14px] transition-all ${currentRole === 'guest' ? 'bg-white text-black shadow' : 'hover:bg-zinc-700'}`}
-              >
-                GUEST
-              </button>
+            <div className="text-right hidden sm:block">
+              <div className="text-[10px] text-zinc-500 uppercase tracking-widest">Signed in as</div>
+              <div className="text-sm font-semibold">
+                {displayName || ROLE_LABELS[currentRole]}
+              </div>
             </div>
-
-            <div className="w-8 h-8 bg-zinc-700 rounded-full flex items-center justify-center cursor-pointer">
-              <User className="w-4 h-4" />
+            <div className={`px-3 py-1.5 rounded-2xl text-[10px] uppercase tracking-widest border ${ROLE_BADGE[currentRole]}`}>
+              {ROLE_LABELS[currentRole]}
             </div>
+            <button
+              onClick={handleLogout}
+              className="px-4 py-2 rounded-2xl text-xs border border-zinc-700 hover:bg-zinc-800 transition-all"
+            >
+              LOG OUT
+            </button>
           </div>
         </div>
 
@@ -949,4 +1397,3 @@ function App() {
 }
 
 export default App;
-

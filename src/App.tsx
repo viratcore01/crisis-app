@@ -220,7 +220,7 @@ function App() {
 
     if (!supabase) {
       const emailPrefix = authEmail.includes('@') ? authEmail.split('@')[0] : authEmail;
-      const derivedName = authName.trim() || emailPrefix || (authRole === 'guest' ? 'Guest' : 'Operator');
+      const derivedName = authName.trim() || emailPrefix || 'Operator';
 
       setIsAuthenticated(true);
       setCurrentRole(authRole);

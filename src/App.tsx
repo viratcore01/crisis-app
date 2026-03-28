@@ -1,4 +1,5 @@
 import { useState, useEffect, type FormEvent } from 'react';
+import type { User as SupabaseUser } from '@supabase/supabase-js';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   AlertTriangle, Flame, Users, MapPin, 
@@ -76,6 +77,21 @@ const isRole = (value: unknown): value is Role => {
   return typeof value === 'string' && ['manager', 'staff', 'guest'].includes(value);
 };
 
+const resolveRoleFromUser = (user: SupabaseUser | null): Role => {
+  const metadataRole = user?.user_metadata?.role;
+  if (isRole(metadataRole)) return metadataRole;
+  const isAnonymous = Boolean((user as { is_anonymous?: boolean } | null)?.is_anonymous);
+  return isAnonymous ? 'guest' : 'staff';
+};
+
+const resolveNameFromUser = (user: SupabaseUser | null): string => {
+  const metadataName = user?.user_metadata?.name;
+  if (typeof metadataName === 'string' && metadataName.trim()) return metadataName.trim();
+  if (user?.email) return user.email.split('@')[0];
+  const isAnonymous = Boolean((user as { is_anonymous?: boolean } | null)?.is_anonymous);
+  return isAnonymous ? 'Guest' : 'Operator';
+};
+
 function App() {
   const [currentRole, setCurrentRole] = useState<Role>('guest');
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -116,12 +132,8 @@ function App() {
         const session = data.session;
         if (session?.user) {
           localStorage.removeItem(AUTH_STORAGE_KEY);
-          const metadataRole = session.user.user_metadata?.role;
-          const resolvedRole = isRole(metadataRole) ? metadataRole : 'staff';
-          const name =
-            typeof session.user.user_metadata?.name === 'string'
-              ? session.user.user_metadata.name
-              : session.user.email?.split('@')[0] ?? '';
+          const resolvedRole = resolveRoleFromUser(session.user);
+          const name = resolveNameFromUser(session.user);
 
           setIsAuthenticated(true);
           setCurrentRole(resolvedRole);
@@ -160,12 +172,8 @@ function App() {
     const { data } = supabase.auth.onAuthStateChange((_event, session) => {
       if (session?.user) {
         localStorage.removeItem(AUTH_STORAGE_KEY);
-        const metadataRole = session.user.user_metadata?.role;
-        const resolvedRole = isRole(metadataRole) ? metadataRole : 'staff';
-        const name =
-          typeof session.user.user_metadata?.name === 'string'
-            ? session.user.user_metadata.name
-            : session.user.email?.split('@')[0] ?? '';
+        const resolvedRole = resolveRoleFromUser(session.user);
+        const name = resolveNameFromUser(session.user);
 
         setIsAuthenticated(true);
         setCurrentRole(resolvedRole);
@@ -194,7 +202,7 @@ function App() {
 
     const needsCredentials = authRole !== 'guest';
     if (!needsCredentials) {
-      handleGuestContinue();
+      await handleGuestContinue();
       return;
     }
 
@@ -260,12 +268,8 @@ function App() {
           return;
         }
 
-        const metadataRole = data.user?.user_metadata?.role;
-        const resolvedRole = isRole(metadataRole) ? metadataRole : authRole;
-        const name =
-          typeof data.user?.user_metadata?.name === 'string'
-            ? data.user?.user_metadata.name
-            : authName.trim() || authEmail.split('@')[0];
+        const resolvedRole = resolveRoleFromUser(data.user);
+        const name = resolveNameFromUser(data.user) || authName.trim() || authEmail.split('@')[0];
 
         setIsAuthenticated(true);
         setCurrentRole(resolvedRole);
@@ -283,12 +287,8 @@ function App() {
           return;
         }
 
-        const metadataRole = data.user?.user_metadata?.role;
-        const resolvedRole = isRole(metadataRole) ? metadataRole : authRole;
-        const name =
-          typeof data.user?.user_metadata?.name === 'string'
-            ? data.user?.user_metadata.name
-            : data.user?.email?.split('@')[0] ?? 'Operator';
+        const resolvedRole = resolveRoleFromUser(data.user);
+        const name = resolveNameFromUser(data.user);
 
         setIsAuthenticated(true);
         setCurrentRole(resolvedRole);
@@ -304,19 +304,48 @@ function App() {
     }
   };
 
-  const handleGuestContinue = () => {
+  const handleGuestContinue = async () => {
     const guestName = authName.trim() || 'Guest';
     setAuthError('');
-    setIsAuthenticated(true);
-    setCurrentRole('guest');
-    setAuthRole('guest');
-    setDisplayName(guestName);
-    setActiveTab('overview');
+    if (!supabase) {
+      setIsAuthenticated(true);
+      setCurrentRole('guest');
+      setAuthRole('guest');
+      setDisplayName(guestName);
+      setActiveTab('overview');
 
-    localStorage.setItem(
-      AUTH_STORAGE_KEY,
-      JSON.stringify({ role: 'guest', name: guestName })
-    );
+      localStorage.setItem(
+        AUTH_STORAGE_KEY,
+        JSON.stringify({ role: 'guest', name: guestName })
+      );
+      return;
+    }
+
+    setAuthLoading(true);
+    try {
+      const { data, error } = await supabase.auth.signInAnonymously();
+      if (error) {
+        setAuthError(error.message);
+        return;
+      }
+
+      if (data.user) {
+        const { error: updateError } = await supabase.auth.updateUser({
+          data: { role: 'guest', name: guestName },
+        });
+        if (updateError) {
+          console.warn('Unable to update guest metadata:', updateError.message);
+        }
+      }
+
+      setIsAuthenticated(true);
+      setCurrentRole('guest');
+      setAuthRole('guest');
+      setDisplayName(guestName);
+      setActiveTab('overview');
+    } finally {
+      setAuthLoading(false);
+    }
   };
 
   const handleLogout = async () => {
